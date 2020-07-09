@@ -1,11 +1,12 @@
 import asyncio
 import sys
+
 from functools import reduce
 from operator import xor
 
-
 from serial import PARITY_EVEN, PARITY_NONE, PARITY_ODD
 from serial.tools.list_ports import comports
+
 from serial_asyncio import create_serial_connection
 
 from PyQt5.QtWidgets import QWidget, QApplication, QVBoxLayout, QPushButton, QHBoxLayout, QLineEdit, QComboBox, \
