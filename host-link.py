@@ -1,16 +1,48 @@
 import asyncio
+import signal
 import sys
+import traceback
 
 from functools import reduce
 from operator import xor
 
+from functools import partial, wraps
+
+from PyQt5.QtCore import Qt
 from serial import PARITY_EVEN, PARITY_NONE, PARITY_ODD
 from serial.tools.list_ports import comports
 
 from serial_asyncio import create_serial_connection
 
 from PyQt5.QtWidgets import QWidget, QApplication, QVBoxLayout, QPushButton, QHBoxLayout, QLineEdit, QComboBox, \
-    QLabel, QPlainTextEdit
+    QLabel, QPlainTextEdit, QErrorMessage
+from quamash import QEventLoop
+
+def display_error(err):
+    app = QApplication.instance()
+    window = app.activeWindow()
+    dialog = QErrorMessage(window)
+    dialog.setWindowModality(Qt.WindowModal)
+    dialog.setWindowTitle("Error")
+    dialog.showMessage(err)
+
+
+def slot_coroutine(async_func):
+    if not asyncio.iscoroutinefunction(async_func):
+        raise RuntimeError('Must be a coroutine!')
+
+    def log_error(future):
+        try:
+            future.result()
+        except Exception as err:
+            display_error(traceback.format_exc())
+
+    @wraps(async_func)
+    def wrapper(self, *args):
+        loop = asyncio.get_event_loop()
+        future = loop.create_task(async_func(self, *args[:-1]))
+        future.add_done_callback(log_error)
+    return wrapper
 
 
 def compute_fcs(msg):
@@ -29,6 +61,8 @@ class TurBoHostLink(QWidget):
         self.loop = loop
 
         self.serial_coro = None
+        self.handler = None
+        self.port = None
 
         self.main_layout = QHBoxLayout()
         self.config_layout = QVBoxLayout()
@@ -130,9 +164,10 @@ class TurBoHostLink(QWidget):
         self.msg_field.textChanged.connect(self.update_output)
         self.send_button.clicked.connect(self.send_message)
 
-    def send_message(self):
+    @slot_coroutine
+    async def send_message(self):
         message = self.output_field.text()
-        print(message)
+        await self.port.send(message)
 
     def update_output(self):
         header = "@"
@@ -149,7 +184,8 @@ class TurBoHostLink(QWidget):
         for port in comports(include_links=False):
             self.serial_port.addItem(f"{port[0]} {port.description}", port)
 
-    def open_port(self):
+    @slot_coroutine
+    async def open_port(self):
         port = self.serial_port.currentData()
         data_bits = self.serial_data_bits.currentData()
         stop_bits = self.serial_stop_bits.currentData()
@@ -165,7 +201,7 @@ class TurBoHostLink(QWidget):
                                                     baudrate=bauds,
                                                     timeout=0.25)
 
-        asyncio.ensure_future(self.serial_coro)
+        self.handler, self.port = await self.serial_coro
 
         self.connect_button.setDisabled(True)
         self.disconnect_button.setDisabled(False)
@@ -177,45 +213,29 @@ class TurBoHostLink(QWidget):
         self.disconnect_button.setDisabled(True)
         self.send_button.setDisabled(True)
 
-    async def send(self, w, msgs):
-        for msg in msgs:
-            w.write(msg)
-            print(f'sent: {msg.decode().rstrip()}')
-            await asyncio.sleep(0.5)
-        w.write(b'DONE\n')
-        print('Done sending')
-
-    async def recv(self, r):
-        print(r)
-        while True:
-            msg = await r.readuntil(b'\n')
-            if msg.rstrip() == b'DONE':
-                print('Done receiving')
-                break
-            print(f'received: {msg.rstrip().decode()}')
-
 
 class Output(asyncio.Protocol):
     def connection_made(self, transport):
         self.transport = transport
+        self.buf = bytes()
+        self.msgs_recvd = 0
+
         print('port opened', transport)
 
         node = '00'
         header = 'TS'
-        data = '1337'
+        data = 'TEST'
         message = f'@{node}{header}{data}'
         fcs = compute_fcs(message)
         terminator = '*\r'
 
         # transport.serial.rts = False  # You can manipulate Serial object via transport
-        transport.serial.write(message.encode("ascii"))
-        transport.serial.write(fcs.encode("ascii"))
-        transport.serial.write(terminator.encode("ascii"))
+        transport.serial.write(message.encode('ascii'))
+        transport.serial.write(fcs.encode('ascii'))
+        transport.serial.write(terminator.encode('ascii'))
 
     def data_received(self, data):
-        print('data received', repr(data))
-        if b'\r' in data:
-            self.transport.close()
+        print('data received', data)
 
     def connection_lost(self, exc):
         print('port closed')
@@ -229,65 +249,22 @@ class Output(asyncio.Protocol):
         print(self.transport.get_write_buffer_size())
         print('resume writing')
 
-
-class Writer(asyncio.Protocol):
-    def connection_made(self, transport):
-        """Store the serial transport and schedule the task to send data.
-        """
-        self.transport = transport
-        print('Writer connection created')
-        asyncio.ensure_future(self.send())
-        print('Writer.send() scheduled')
-
-    def connection_lost(self, exc):
-        print('Writer closed')
-
-    async def send(self):
-        """Send four newline-terminated messages, one byte at a time.
-        """
-        message = b'foo\nbar\nbaz\nqux\n'
-        for b in message:
-            await asyncio.sleep(0.5)
-            self.transport.serial.write(bytes([b]))
-            print(f'Writer sent: {bytes([b])}')
-        self.transport.close()
+    async def send(self, message):
+        self.transport.serial.write(message.encode('ascii'))
+        print(f'Writer sent: {message}')
 
 
-class Reader(asyncio.Protocol):
-    def connection_made(self, transport):
-        """Store the serial transport and prepare to receive data.
-        """
-        self.transport = transport
-        self.buf = bytes()
-        self.msgs_recvd = 0
-        print('Reader connection created')
-
-    def data_received(self, data):
-        """Store characters until a newline is received.
-        """
-        self.buf += data
-        if b'\n' in self.buf:
-            lines = self.buf.split(b'\n')
-            self.buf = lines[-1]  # whatever was left over
-            for line in lines[:-1]:
-                print(f'Reader received: {line.decode()}')
-                self.msgs_recvd += 1
-        if self.msgs_recvd == 4:
-            self.transport.close()
-
-    def connection_lost(self, exc):
-        print('Reader closed')
-
-
-async def main(loop):
+def main():
     app = QApplication(sys.argv)
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)  # NEW must set the event loop
 
     term = TurBoHostLink(loop)
     term.show()
 
-    app.exec_()
+    with loop:
+        loop.run_forever()
 
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(main(loop))
-loop.close()
+if __name__ == '__main__':
+    main()
