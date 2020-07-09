@@ -16,7 +16,8 @@ from serial_asyncio import create_serial_connection
 
 from PyQt5.QtWidgets import QWidget, QApplication, QVBoxLayout, QPushButton, QHBoxLayout, QLineEdit, QComboBox, \
     QLabel, QPlainTextEdit, QErrorMessage
-from quamash import QEventLoop
+from qasync import QEventLoop
+
 
 def display_error(err):
     app = QApplication.instance()
@@ -61,7 +62,7 @@ class TurBoHostLink(QWidget):
         self.loop = loop
 
         self.serial_coro = None
-        self.handler = None
+        self.transport = None
         self.port = None
 
         self.main_layout = QHBoxLayout()
@@ -166,8 +167,14 @@ class TurBoHostLink(QWidget):
 
     @slot_coroutine
     async def send_message(self):
-        message = self.output_field.text()
-        await self.port.send(message)
+        msg = self.output_field.text()
+        await self.port.send(msg)
+        msg = msg.rstrip('\r')
+        self.response_field.appendPlainText(f"PC -> {msg}")
+
+    def recv_message(self, msg):
+        msg = msg.rstrip('\r')
+        self.response_field.appendPlainText(f"PLC -> {msg}")
 
     def update_output(self):
         header = "@"
@@ -198,14 +205,16 @@ class TurBoHostLink(QWidget):
                                                     bytesize=data_bits,
                                                     stopbits=stop_bits,
                                                     parity=parity,
-                                                    baudrate=bauds,
-                                                    timeout=0.25)
+                                                    baudrate=bauds)
 
-        self.handler, self.port = await self.serial_coro
+        self.transport, self.port = await self.serial_coro
+
+        self.port.set_recv_callback(self.recv_message)
 
         self.connect_button.setDisabled(True)
         self.disconnect_button.setDisabled(False)
         self.send_button.setDisabled(False)
+
 
     def close_port(self):
         self.loop.stop()
@@ -215,13 +224,21 @@ class TurBoHostLink(QWidget):
 
 
 class Output(asyncio.Protocol):
+    def __init__(self):
+        super(Output, self).__init__()
+        self.recv_callback = None
+
     def connection_made(self, transport):
         self.transport = transport
         self.buf = bytes()
-        self.msgs_recvd = 0
 
-        print('port opened', transport)
+        print('port opened')
+        print(transport)
 
+    def set_recv_callback(self, func):
+        self.recv_callback = func
+
+    def test_comm(self):
         node = '00'
         header = 'TS'
         data = 'TEST'
@@ -230,12 +247,20 @@ class Output(asyncio.Protocol):
         terminator = '*\r'
 
         # transport.serial.rts = False  # You can manipulate Serial object via transport
-        transport.serial.write(message.encode('ascii'))
-        transport.serial.write(fcs.encode('ascii'))
-        transport.serial.write(terminator.encode('ascii'))
+        self.transport.serial.write(message.encode('ascii'))
+        self.transport.serial.write(fcs.encode('ascii'))
+        self.transport.serial.write(terminator.encode('ascii'))
 
     def data_received(self, data):
-        print('data received', data)
+        """Store characters until a newline is received.
+        """
+        self.buf += data
+        if b'\r' in self.buf:
+            lines = self.buf.split(b'\r')
+            self.buf = lines[-1]  # whatever was left over
+            for line in lines[:-1]:
+                print(f'Reader received: {line.decode()}')
+                self.recv_callback(line.decode())
 
     def connection_lost(self, exc):
         print('port closed')
@@ -252,6 +277,7 @@ class Output(asyncio.Protocol):
     async def send(self, message):
         self.transport.serial.write(message.encode('ascii'))
         print(f'Writer sent: {message}')
+
 
 
 def main():
