@@ -43,6 +43,7 @@ def slot_coroutine(async_func):
         loop = asyncio.get_event_loop()
         future = loop.create_task(async_func(self, *args[:-1]))
         future.add_done_callback(log_error)
+
     return wrapper
 
 
@@ -215,7 +216,6 @@ class TurBoHostLink(QWidget):
         self.disconnect_button.setDisabled(False)
         self.send_button.setDisabled(False)
 
-
     def close_port(self):
         self.loop.stop()
         self.connect_button.setDisabled(False)
@@ -277,7 +277,6 @@ class Output(asyncio.Protocol):
     async def send(self, message):
         self.transport.serial.write(message.encode('ascii'))
         print(f'Writer sent: {message}')
-
 
 
 def main():
