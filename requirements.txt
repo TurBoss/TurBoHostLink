@@ -1,4 +1,4 @@
-pyserial~=3.4
-PyQt5~=5.15.0
-git+https://github.com/pyserial/pyserial-asyncio.git
-qasync~=0.9.4
+pyserial
+PyQt5
+pyserial-asyncio
+qasync
